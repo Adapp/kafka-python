@@ -12,6 +12,7 @@ import kafka
 from kafka.common import (
     FetchRequest,
     OffsetRequest, OffsetCommitRequest,
+    OffsetOutOfRangeError,
     OffsetFetchRequest,
     ConsumerFetchSizeTooSmall, ConsumerNoMoreData
 )
@@ -479,34 +480,45 @@ def _mp_consume(client, group, topic, chunk, queue, start, exit, pause, size, fe
     consumer.provide_partition_info()
 
     while True:
-        # Wait till the controller indicates us to start consumption
-        start.wait()
+        try:
+            # Wait till the controller indicates us to start consumption
+            start.wait()
 
-        # If we are asked to quit, do so
-        if exit.is_set():
-            break
+            # If we are asked to quit, do so
+            if exit.is_set():
+                break
 
-        # Consume messages and add them to the queue. If the controller
-        # indicates a specific number of messages, follow that advice
-        count = 0
+            # Consume messages and add them to the queue. If the controller
+            # indicates a specific number of messages, follow that advice
+            count = 0
 
-        message = consumer.get_message()
-        if message:
-            queue.put(message)
-            count += 1
+            message = consumer.get_message()
+            if message:
+                queue.put(message)
+                count += 1
 
-            # We have reached the required size. The controller might have
-            # more than what he needs. Wait for a while.
-            # Without this logic, it is possible that we run into a big
-            # loop consuming all available messages before the controller
-            # can reset the 'start' event
-            if count == size.value:
-                pause.wait()
+                # We have reached the required size. The controller might have
+                # more than what he needs. Wait for a while.
+                # Without this logic, it is possible that we run into a big
+                # loop consuming all available messages before the controller
+                # can reset the 'start' event
+                if count == size.value:
+                    pause.wait()
 
-        else:
-            # In case we did not receive any message, give up the CPU for
-            # a while before we try again
-            time.sleep(NO_MESSAGES_WAIT_TIME_SECONDS)
+            else:
+                # In case we did not receive any message, give up the CPU for
+                # a while before we try again
+                time.sleep(NO_MESSAGES_WAIT_TIME_SECONDS)
+        except OffsetOutOfRangeError:
+            log.exception('The offset is out of range, resetting the offset to the head.')
+            try:
+                client.seek(0, 0)
+            except:
+                log.exception('An unexpected exception occurred while setting the '
+                        'offset to the head!')
+        except Exception as ex:
+            log.exception('An unexpected exception occurred!')
+            
 
     consumer.stop()
 
@@ -600,14 +612,16 @@ class MultiProcessConsumer(Consumer):
             (self.group, self.topic, len(self.procs))
 
     def stop(self):
-        # Set exit and start off all waiting consumers
+        """
+        Set exit and start off all waiting consumers.
+        Note that subprocesses will not exit until the message queue is empty.
+        """
         self.exit.set()
         self.pause.set()
         self.start.set()
 
         for proc in self.procs:
             proc.join()
-            proc.terminate()
 
         super(MultiProcessConsumer, self).stop()
 
