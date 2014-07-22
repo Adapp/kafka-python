@@ -618,11 +618,10 @@ class MultiProcessConsumer(Consumer):
         Useful to determine if you need to keep calling get_messages after stop() has been
         invoked because the child processes will not exit until the internal Queue is empty.
         """
-        still_alive = not self.queue.empty()
         for proc in self.procs:
             if proc.exitcode is None:
-                still_alive = True
-        return still_alive
+                return True
+        return not self.queue.empty()
 
     def stop(self):
         """
