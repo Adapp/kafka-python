@@ -512,7 +512,7 @@ def _mp_consume(client, group, topic, chunk, queue, start, exit, pause, size, fe
         except OffsetOutOfRangeError:
             log.exception('The offset is out of range, resetting the offset to the head.')
             try:
-                client.seek(0, 0)
+                consumer.seek(0, 0)
             except:
                 log.exception('An unexpected exception occurred while setting the '
                         'offset to the head!')
@@ -610,6 +610,19 @@ class MultiProcessConsumer(Consumer):
     def __repr__(self):
         return '<MultiProcessConsumer group=%s, topic=%s, consumers=%d>' % \
             (self.group, self.topic, len(self.procs))
+
+    def is_alive(self):
+        """
+        Returns true if the internal Queue still has items that need to be retrieved
+        or at least one of the child consumer processes has not exited. Returns false otherwise.
+        Useful to determine if you need to keep calling get_messages after stop() has been
+        invoked because the child processes will not exit until the internal Queue is empty.
+        """
+        still_alive = not self.queue.empty()
+        for proc in self.procs:
+            if proc.exitcode is None:
+                still_alive = True
+        return still_alive
 
     def stop(self):
         """
