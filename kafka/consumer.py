@@ -12,7 +12,6 @@ import kafka
 from kafka.common import (
     FetchRequest,
     OffsetRequest, OffsetCommitRequest,
-    OffsetOutOfRangeError,
     OffsetFetchRequest,
     ConsumerFetchSizeTooSmall, ConsumerNoMoreData
 )
