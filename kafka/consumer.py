@@ -247,7 +247,7 @@ class SimpleConsumer(Consumer):
             auto_commit=auto_commit,
             auto_commit_every_n=auto_commit_every_n,
             auto_commit_every_t=auto_commit_every_t,
-            should_fetch_offset=True)
+            should_fetch_offset=should_fetch_offset)
 
         if max_buffer_size is not None and buffer_size > max_buffer_size:
             raise ValueError("buffer_size (%d) is greater than "
