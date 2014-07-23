@@ -13,6 +13,7 @@ from kafka.common import (
     FetchRequest,
     OffsetRequest, OffsetCommitRequest,
     OffsetFetchRequest,
+    OffsetOutOfRangeError,
     ConsumerFetchSizeTooSmall, ConsumerNoMoreData
 )
 
@@ -115,9 +116,11 @@ class Consumer(object):
                               callback=get_or_init_offset_callback,
                               fail_on_error=False)
                 self.offsets[partition] = offset
+                log.info('For partition %d fetched offset %d.', partition, offset)
         else:
             for partition in partitions:
                 self.offsets[partition] = 0
+                log.info('Set the offset for partition %d to 0 due to not being able to fetch offsets.', partition)
 
     def commit(self, partitions=None):
         """
@@ -517,8 +520,18 @@ def _mp_consume(client, group, topic, chunk, queue, start, exit, pause, size,
                 # In case we did not receive any message, give up the CPU for
                 # a while before we try again
                 time.sleep(NO_MESSAGES_WAIT_TIME_SECONDS)
+        except OffsetOutOfRangeError as ex:
+            log.exception('Encountered an OffsetOutOfRangeError problem. '
+                    'Setting the offset to the head of the file.')
+            try:
+                consumer.seek(0, 0)
+            except:
+                log.exception('A really bad exception occurred when trying to set the '
+                        'consumer\'s offset to the head of the topic.')
         except Exception as ex:
-            log.exception('An unexpected exception occurred!')
+            log.exception('Encountered an unexpected exception!')
+        except:
+            log.exception('Encountered a really bad unexpected exception!')
 
     consumer.stop()
 
@@ -607,7 +620,7 @@ class MultiProcessConsumer(Consumer):
                     self.pause, self.size, fetch_size_bytes,
                     buffer_size, max_buffer_size, should_fetch_offset)
 
-            proc = Process(target=_mp_consume, args=args)
+            proc = Process(target=_mp_consume, name='ChildConsumer%d' % (len(self.procs) + 1), args=args)
             proc.daemon = True
             proc.start()
             self.procs.append(proc)
