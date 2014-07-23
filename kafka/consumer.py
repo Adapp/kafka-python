@@ -73,7 +73,8 @@ class Consumer(object):
     """
     def __init__(self, client, group, topic, partitions=None, auto_commit=True,
                  auto_commit_every_n=AUTO_COMMIT_MSG_COUNT,
-                 auto_commit_every_t=AUTO_COMMIT_INTERVAL):
+                 auto_commit_every_t=AUTO_COMMIT_INTERVAL,
+                 should_fetch_offset=False):
 
         self.client = client
         self.topic = topic
@@ -107,7 +108,7 @@ class Consumer(object):
             except kafka.common.UnknownTopicOrPartitionError:
                 return 0
 
-        if auto_commit:
+        if auto_commit or should_fetch_offset:
             for partition in partitions:
                 req = OffsetFetchRequest(topic, partition)
                 (offset,) = self.client.send_offset_fetch_request(group, [req],
@@ -221,6 +222,10 @@ class SimpleConsumer(Consumer):
     iter_timeout:        default None. How much time (in seconds) to wait for a
                          message in the iterator before exiting. None means no
                          timeout, so it will wait forever.
+    should_fetch_offset: Flag that enables the fetching of the offset in the consumer
+                         even if auto_commit is set to False. If auto_commit is set to true
+                         this flag has no effect.
+
 
     Auto commit details:
     If both auto_commit_every_n and auto_commit_every_t are set, they will
@@ -234,13 +239,15 @@ class SimpleConsumer(Consumer):
                  fetch_size_bytes=FETCH_MIN_BYTES,
                  buffer_size=FETCH_BUFFER_SIZE_BYTES,
                  max_buffer_size=MAX_FETCH_BUFFER_SIZE_BYTES,
-                 iter_timeout=None):
+                 iter_timeout=None,
+                 should_fetch_offset=False):
         super(SimpleConsumer, self).__init__(
             client, group, topic,
             partitions=partitions,
             auto_commit=auto_commit,
             auto_commit_every_n=auto_commit_every_n,
-            auto_commit_every_t=auto_commit_every_t)
+            auto_commit_every_t=auto_commit_every_t,
+            should_fetch_offset=should_fetch_offset)
 
         if max_buffer_size is not None and buffer_size > max_buffer_size:
             raise ValueError("buffer_size (%d) is greater than "
@@ -451,7 +458,8 @@ class SimpleConsumer(Consumer):
                     log.debug("Done iterating over partition %s" % partition)
                 partitions = retry_partitions
 
-def _mp_consume(client, group, topic, chunk, queue, start, exit, pause, size, fetch_size, buf_size, max_buf_size):
+def _mp_consume(client, group, topic, chunk, queue, start, exit, pause, size,
+            fetch_size, buf_size, max_buf_size, should_fetch_offset):
     """
     A child process worker which consumes messages based on the
     notifications given by the controller process
@@ -473,40 +481,44 @@ def _mp_consume(client, group, topic, chunk, queue, start, exit, pause, size, fe
                               auto_commit_every_t=None,
                               fetch_size_bytes=fetch_size,
                               buffer_size=buf_size,
-                              max_buffer_size=max_buf_size)
+                              max_buffer_size=max_buf_size,
+                              should_fetch_offset=should_fetch_offset)
 
     # Ensure that the consumer provides the partition information
     consumer.provide_partition_info()
 
     while True:
-        # Wait till the controller indicates us to start consumption
-        start.wait()
+        try:
+            # Wait till the controller indicates us to start consumption
+            start.wait()
 
-        # If we are asked to quit, do so
-        if exit.is_set():
-            break
+            # If we are asked to quit, do so
+            if exit.is_set():
+                break
 
-        # Consume messages and add them to the queue. If the controller
-        # indicates a specific number of messages, follow that advice
-        count = 0
+            # Consume messages and add them to the queue. If the controller
+            # indicates a specific number of messages, follow that advice
+            count = 0
 
-        message = consumer.get_message()
-        if message:
-            queue.put(message)
-            count += 1
+            message = consumer.get_message()
+            if message:
+                queue.put(message)
+                count += 1
 
-            # We have reached the required size. The controller might have
-            # more than what he needs. Wait for a while.
-            # Without this logic, it is possible that we run into a big
-            # loop consuming all available messages before the controller
-            # can reset the 'start' event
-            if count == size.value:
-                pause.wait()
+                # We have reached the required size. The controller might have
+                # more than what he needs. Wait for a while.
+                # Without this logic, it is possible that we run into a big
+                # loop consuming all available messages before the controller
+                # can reset the 'start' event
+                if count == size.value:
+                    pause.wait()
 
-        else:
-            # In case we did not receive any message, give up the CPU for
-            # a while before we try again
-            time.sleep(NO_MESSAGES_WAIT_TIME_SECONDS)
+            else:
+                # In case we did not receive any message, give up the CPU for
+                # a while before we try again
+                time.sleep(NO_MESSAGES_WAIT_TIME_SECONDS)
+        except Exception as ex:
+            log.exception('An unexpected exception occurred!')
 
     consumer.stop()
 
@@ -534,6 +546,9 @@ class MultiProcessConsumer(Consumer):
                          have available. This will double as needed.
     max_buffer_size:     default 16K. Max number of bytes to tell kafka we have
                          available. None means no limit.
+    should_fetch_offset: Flag that enables the fetching of the offset in the consumer(s)
+                         even if auto_commit is set to False. If auto_commit is set to true
+                         this flag has no effect.
 
     Auto commit details:
     If both auto_commit_every_n and auto_commit_every_t are set, they will
@@ -548,7 +563,8 @@ class MultiProcessConsumer(Consumer):
                  partitions_per_proc=0,
                  fetch_size_bytes=FETCH_MIN_BYTES,
                  buffer_size=FETCH_BUFFER_SIZE_BYTES,
-                 max_buffer_size=MAX_FETCH_BUFFER_SIZE_BYTES):
+                 max_buffer_size=MAX_FETCH_BUFFER_SIZE_BYTES,
+                 should_fetch_offset=False):
 
         # Initiate the base consumer class
         super(MultiProcessConsumer, self).__init__(
@@ -556,7 +572,8 @@ class MultiProcessConsumer(Consumer):
             partitions=None,
             auto_commit=auto_commit,
             auto_commit_every_n=auto_commit_every_n,
-            auto_commit_every_t=auto_commit_every_t)
+            auto_commit_every_t=auto_commit_every_t,
+            should_fetch_offset=should_fetch_offset)
 
         # Variables for managing and controlling the data flow from
         # consumer child process to master
@@ -588,7 +605,7 @@ class MultiProcessConsumer(Consumer):
                     group, topic, chunk,
                     self.queue, self.start, self.exit,
                     self.pause, self.size, fetch_size_bytes,
-                    buffer_size, max_buffer_size)
+                    buffer_size, max_buffer_size, should_fetch_offset)
 
             proc = Process(target=_mp_consume, args=args)
             proc.daemon = True
@@ -599,15 +616,29 @@ class MultiProcessConsumer(Consumer):
         return '<MultiProcessConsumer group=%s, topic=%s, consumers=%d>' % \
             (self.group, self.topic, len(self.procs))
 
+    def is_alive(self):
+        """
+        Returns true if the internal Queue still has items that need to be retrieved
+        or at least one of the child consumer processes has not exited. Returns false otherwise.
+        Useful to determine if you need to keep calling get_messages after stop() has been
+        invoked because the child processes will not exit until the internal Queue is empty.
+        """
+        for proc in self.procs:
+            if proc.exitcode is None:
+                return True
+        return not self.queue.empty()
+
     def stop(self):
-        # Set exit and start off all waiting consumers
+        """
+        Set exit and start off all waiting consumers.
+        Note that subprocesses will not exit until the message queue is empty.
+        """
         self.exit.set()
         self.pause.set()
         self.start.set()
 
         for proc in self.procs:
             proc.join()
-            proc.terminate()
 
         super(MultiProcessConsumer, self).stop()
 
